@@ -2,8 +2,11 @@ name: Lazada Stock Checker
 
 on:
   schedule:
-    # Every 15 minutes from 10AM to 2PM 
-    - cron: '*/15 2-6 * * *'
+    - cron: '7,17,27,37,47,57 10-13 * * *'
+      timezone: 'Asia/Singapore'
+
+    - cron: '0 14 * * *'
+      timezone: 'Asia/Singapore'
 
   workflow_dispatch:
 
