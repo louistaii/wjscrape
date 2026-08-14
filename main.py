@@ -1,4 +1,5 @@
 import time
+import random
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from playwright.sync_api import sync_playwright
 import requests
@@ -24,13 +25,60 @@ def send_telegram_message(message):
     response.raise_for_status()
 
 
-
 BASE_URL = (
     "https://www.lazada.sg/pokemon-store-online-singapore/"
     "?q=All-Products&shop_category_ids=762252&from=wangpu"
 )
 
 PAGE_SIZE = 40
+
+# Realistic Chrome build to keep the UA and sec-ch-ua headers consistent.
+CHROME_VERSION = "124.0.0.0"
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    f"Chrome/{CHROME_VERSION} Safari/537.36"
+)
+
+# Small pool of realistic viewport sizes; picked randomly per run
+# instead of using a single fixed 1920x1080 every time.
+VIEWPORTS = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+]
+
+# Injected before any page script runs, to patch over the most common
+# automation tells that bot-detection scripts check for.
+STEALTH_INIT_SCRIPT = """
+// Hide the webdriver flag
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined
+});
+
+// Pretend a normal plugin list exists (headless Chromium reports none)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5]
+});
+
+// Normal language list
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-SG', 'en-US', 'en']
+});
+
+// window.chrome exists on real Chrome, not on headless by default
+window.chrome = { runtime: {} };
+
+// Spoof a plausible permissions response for notifications
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters)
+);
+"""
 
 
 def build_page_url(base_url: str, page_num: int) -> str:
@@ -43,6 +91,11 @@ def build_page_url(base_url: str, page_num: int) -> str:
     return urlunparse(
         parsed._replace(query=urlencode(query, doseq=True))
     )
+
+
+def human_pause(min_s=1.5, max_s=4.0):
+    """Random delay to avoid perfectly uniform, machine-speed timing."""
+    time.sleep(random.uniform(min_s, max_s))
 
 
 def scrape_page(page, url: str):
@@ -90,8 +143,17 @@ def scrape_page(page, url: str):
     except Exception:
         print("  Warning: page took too long to load, continuing...")
 
-    # Give Lazada's normal page requests time to finish.
-    page.wait_for_timeout(5000)
+    # Give Lazada's normal page requests time to finish, with some
+    # jitter instead of a fixed wait every single time.
+    page.wait_for_timeout(random.randint(4000, 7000))
+
+    # Small human-like scroll, some detection scripts check for any
+    # interaction/movement at all before trusting a session.
+    try:
+        page.mouse.wheel(0, random.randint(200, 800))
+        page.wait_for_timeout(random.randint(300, 900))
+    except Exception:
+        pass
 
     page.remove_listener("response", on_response)
 
@@ -118,10 +180,10 @@ def scrape_all_pages(page, max_pages=3):
 
     for page_num in range(1, max_pages + 1):
 
-        # Delay between pages
+        # Delay between pages, randomized instead of a flat 3s.
         if page_num > 1:
             print("  Waiting before next page...")
-            time.sleep(3)
+            human_pause(2.5, 5.5)
 
         url = build_page_url(BASE_URL, page_num)
 
@@ -221,22 +283,41 @@ if __name__ == "__main__":
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
-            headless=True
+            headless=True,
+            args=[
+                # Removes the "Chrome is being controlled by automated
+                # test software" signal some detection scripts look for.
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
 
+        viewport = random.choice(VIEWPORTS)
+
         context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={
-                "width": 1920,
-                "height": 1080
+            user_agent=USER_AGENT,
+            viewport=viewport,
+            locale="en-SG",
+            timezone_id="Asia/Singapore",
+            extra_http_headers={
+                "Accept-Language": "en-SG,en-US;q=0.9,en;q=0.8",
+                "sec-ch-ua": (
+                    f'"Chromium";v="{CHROME_VERSION.split(".")[0]}", '
+                    f'"Google Chrome";v="{CHROME_VERSION.split(".")[0]}", '
+                    '"Not-A.Brand";v="99"'
+                ),
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
             },
         )
 
+        # Applied to every page created in this context, before any
+        # site script runs.
+        context.add_init_script(STEALTH_INIT_SCRIPT)
+
         page = context.new_page()
+
+        # Small pause before the very first navigation.
+        human_pause(1.0, 2.5)
 
         # Scrape everything once
         all_items = scrape_all_pages(page)
@@ -281,11 +362,8 @@ if __name__ == "__main__":
         f"In stock: {len(in_stock_items)}"
     )
 
-
-
-
     if all_items is None or len(all_items) == 0:
-            message = "🔴 MOTHERFUCKER GOT BOT CHECKED."
+        message = "🔴 Bot checked / no data captured."
     else:
         if in_stock_items:
             message = "🟢 Items currently in stock:\n\n"
@@ -297,12 +375,5 @@ if __name__ == "__main__":
                 )
         else:
             message = "🔴 No products currently in stock.\n\n"
-            #message += "First 10 items detected:\n"
-            #for item in all_items[:10]:
-            #    message += (
-            #        f"{item['name']}\n"
-            #        f"${item['price']}\n"
-            #        f"{item['url']}\n\n"
-            #        )
-    
+
     send_telegram_message(message)
