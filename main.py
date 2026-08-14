@@ -280,13 +280,16 @@ def get_in_stock_items(page):
 
 if __name__ == "__main__":
 
+    # Random startup delay
+    startup_delay = random.uniform(5, 90)
+    print(f"Startup delay: {startup_delay:.1f}s")
+    time.sleep(startup_delay)
+
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
             headless=True,
             args=[
-                # Removes the "Chrome is being controlled by automated
-                # test software" signal some detection scripts look for.
                 "--disable-blink-features=AutomationControlled",
             ],
         )
@@ -310,8 +313,6 @@ if __name__ == "__main__":
             },
         )
 
-        # Applied to every page created in this context, before any
-        # site script runs.
         context.add_init_script(STEALTH_INIT_SCRIPT)
 
         page = context.new_page()
