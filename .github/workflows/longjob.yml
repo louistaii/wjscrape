@@ -1,0 +1,28 @@
+name: Lazada Stock Checker
+on:
+  repository_dispatch:
+    types: [run-longjob]
+  workflow_dispatch:  
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 260
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python dependencies
+        run: |
+          pip install playwright requests
+      - name: Install Playwright Chromium
+        run: |
+          playwright install --with-deps chromium
+      - name: Run scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python main.py

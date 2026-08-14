@@ -22,8 +22,12 @@ def send_telegram_message(message):
         timeout=30,
     )
 
-    response.raise_for_status()
+    if not response.ok:
+        print("Telegram error:")
+        print(response.text)
+        print("Message length:", len(message))
 
+    response.raise_for_status()
 
 BASE_URL = (
     "https://www.lazada.sg/pokemon-store-online-singapore/"
