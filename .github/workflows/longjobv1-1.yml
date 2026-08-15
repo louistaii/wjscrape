@@ -38,4 +38,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          xvfb-run --auto-servernum python main.py
+          xvfb-run --auto-servernum python longjobv1-1.py
