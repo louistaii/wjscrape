@@ -1,4 +1,4 @@
-name: Lazada Stock Checker (Long Job)
+name: Lazada Stock Checker (Long Job v1-1)
 on:
   repository_dispatch:
     types: [run-longjobv1-1]
