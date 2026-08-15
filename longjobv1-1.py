@@ -11,6 +11,8 @@ import os
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+GITHUB_TOKEN = os.environ["GH_DISPATCH_TOKEN"]
+GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 
 
 def send_telegram_message(message):
@@ -41,11 +43,24 @@ SGT = ZoneInfo("Asia/Singapore")
 POLL_INTERVAL = 5  
 # Only send a Telegram alert when the set of in-stock items actually changes
 ALERT_ON_NO_CHANGE_EVERY = 120  # still send a heartbeat every N cycles
-EMPTY_STREAK_ALERT_THRESHOLD = 1
+EMPTY_STREAK_ALERT_THRESHOLD = 2
 # Hard ceiling on how long we'll event-wait for the product AJAX response on a single page load
 AJAX_WAIT_HARD_CAP_MS = 20000
 
 
+
+def switch_servers(event_type="run-longjobv1-1"):
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/dispatches"
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        },
+        json={"event_type": event_type},
+        timeout=30,
+    )
+    response.raise_for_status()
 
 
 def build_page_url(base_url: str, page_num: int) -> str:
@@ -331,7 +346,7 @@ if __name__ == "__main__":
                         f"⚠️ No product data captured for "
                         f"{empty_streak} cycles in a row "
                         f"(last reason: {reason_label}). "
-                        "Possible bot-check or block."
+                        "Switching servers..."
                     )
                     empty_streak_alerted = True
                     print("  Alert sent. Stopping run.")
