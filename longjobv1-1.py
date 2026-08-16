@@ -349,6 +349,7 @@ if __name__ == "__main__":
                         "Switching servers..."
                     )
                     empty_streak_alerted = True
+                    switch_servers()
                     print("  Alert sent. Stopping run.")
                     break
 
