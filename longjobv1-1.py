@@ -47,6 +47,9 @@ EMPTY_STREAK_ALERT_THRESHOLD = 2
 # Hard ceiling on how long we'll event-wait for the product AJAX response on a single page load
 AJAX_WAIT_HARD_CAP_MS = 20000
 
+# Try to wait out ip soft ban
+RETRY_PAUSE_MINUTES = 10
+
 
 
 def switch_servers(event_type="run-longjobv1-1"):
@@ -293,6 +296,52 @@ def format_stock_message(in_stock_items):
     return message
 
 
+def launch_browser(p):
+    """Starts a fresh stealth Chrome + Playwright connection.
+    Returns (sb, browser, context, page) so callers can close/relaunch."""
+    print("Launching stealth Chrome via SeleniumBase CDP mode...")
+    sb = sb_cdp.Chrome(locale="en")
+    endpoint_url = sb.get_endpoint_url()
+
+    browser = p.chromium.connect_over_cdp(endpoint_url)
+    context = browser.contexts[0]
+    page = context.pages[0]
+
+    human_pause(1.0, 2.5)
+    return sb, browser, context, page
+
+
+def close_browser(sb, browser):
+    """Best-effort teardown -- swallow errors so a already-dead
+    connection doesn't crash the retry flow."""
+    try:
+        browser.close()
+    except Exception:
+        pass
+    try:
+        sb.quit()
+    except Exception:
+        pass
+
+
+def pause_and_relaunch(p, sb, browser, minutes):
+    """Closes the current browser, sleeps, relaunches, and does a single
+    probe page-1 fetch to see whether the pause was enough.
+    Returns (sb, browser, context, page, probe_status)."""
+    print(f"  Closing browser and pausing {minutes} min before retrying...")
+    close_browser(sb, browser)
+    time.sleep(minutes * 60)
+
+    sb, browser, context, page = launch_browser(p)
+
+    probe_url = build_page_url(BASE_URL, 1)
+    print("  Probing page 1 after pause...")
+    _items, probe_status = scrape_page(page, probe_url, page_num=1)
+    print(f"  Probe result after {minutes} min pause: {probe_status}")
+
+    return sb, browser, context, page, probe_status
+
+
 if __name__ == "__main__":
 
     send_telegram_message("Started v1.1-beta")
@@ -300,20 +349,9 @@ if __name__ == "__main__":
     # Calculate stop time exactly 3 hours from script start
     stop_time = datetime.now(SGT) + timedelta(hours=3)
 
-    print("Launching stealth Chrome via SeleniumBase CDP mode...")
-
-    sb = sb_cdp.Chrome(
-        locale="en",
-    )
-    endpoint_url = sb.get_endpoint_url()
-
     with sync_playwright() as p:
 
-        browser = p.chromium.connect_over_cdp(endpoint_url)
-        context = browser.contexts[0]
-        page = context.pages[0]
-
-        human_pause(1.0, 2.5)
+        sb, browser, context, page = launch_browser(p)
 
         last_in_stock_ids = set()
         empty_streak = 0
@@ -342,16 +380,35 @@ if __name__ == "__main__":
                     empty_streak >= EMPTY_STREAK_ALERT_THRESHOLD
                     and not empty_streak_alerted
                 ):
+                    empty_streak_alerted = True
+
                     send_telegram_message(
                         f"⚠️ No product data captured for "
                         f"{empty_streak} cycles in a row "
                         f"(last reason: {reason_label}). "
-                        "Switching servers..."
+                        f"Pausing {RETRY_PAUSE_MINUTES} min before retrying..."
                     )
-                    empty_streak_alerted = True
-                    switch_servers()
-                    print("  Alert sent. Stopping run.")
-                    break
+
+                    sb, browser, context, page, probe_status = pause_and_relaunch(
+                        p, sb, browser, RETRY_PAUSE_MINUTES
+                    )
+
+                    if probe_status == "ok":
+                        send_telegram_message(
+                            f"✅ Recovered after {RETRY_PAUSE_MINUTES} min pause. "
+                            "Resuming normal polling."
+                        )
+                        empty_streak = 0
+                        empty_streak_alerted = False
+                    else:
+                        send_telegram_message(
+                            f"❌ Still {probe_status} after {RETRY_PAUSE_MINUTES} "
+                            "min pause. Switching servers..."
+                        )
+                        close_browser(sb, browser)
+                        switch_servers()
+                        print("  Alert sent. Stopping run.")
+                        break
 
             else:
                 empty_streak = 0
@@ -395,8 +452,6 @@ if __name__ == "__main__":
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        browser.close()
-
-    sb.quit() 
+        close_browser(sb, browser)
 
     print("Stop time reached, exiting.")
