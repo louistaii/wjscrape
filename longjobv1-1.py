@@ -47,7 +47,7 @@ EMPTY_STREAK_ALERT_THRESHOLD = 2
 # Hard ceiling on how long we'll event-wait for the product AJAX response on a single page load
 AJAX_WAIT_HARD_CAP_MS = 20000
 
-# Try to wait out ip soft ban
+# Retry-in-place settings
 RETRY_PAUSE_MINUTES = 10
 
 
@@ -296,26 +296,27 @@ def format_stock_message(in_stock_items):
     return message
 
 
-def launch_browser(p):
-    """Starts a fresh stealth Chrome + Playwright connection.
-    Returns (sb, browser, context, page) so callers can close/relaunch."""
+def launch_browser():
     print("Launching stealth Chrome via SeleniumBase CDP mode...")
     sb = sb_cdp.Chrome(locale="en")
     endpoint_url = sb.get_endpoint_url()
 
-    browser = p.chromium.connect_over_cdp(endpoint_url)
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.connect_over_cdp(endpoint_url)
     context = browser.contexts[0]
     page = context.pages[0]
 
     human_pause(1.0, 2.5)
-    return sb, browser, context, page
+    return sb, playwright, browser, context, page
 
 
-def close_browser(sb, browser):
-    """Best-effort teardown -- swallow errors so a already-dead
-    connection doesn't crash the retry flow."""
+def close_browser(sb, playwright, browser):
     try:
         browser.close()
+    except Exception:
+        pass
+    try:
+        playwright.stop()
     except Exception:
         pass
     try:
@@ -324,22 +325,22 @@ def close_browser(sb, browser):
         pass
 
 
-def pause_and_relaunch(p, sb, browser, minutes):
+def pause_and_relaunch(sb, playwright, browser, minutes):
     """Closes the current browser, sleeps, relaunches, and does a single
     probe page-1 fetch to see whether the pause was enough.
-    Returns (sb, browser, context, page, probe_status)."""
+    Returns (sb, playwright, browser, context, page, probe_status)."""
     print(f"  Closing browser and pausing {minutes} min before retrying...")
-    close_browser(sb, browser)
+    close_browser(sb, playwright, browser)
     time.sleep(minutes * 60)
 
-    sb, browser, context, page = launch_browser(p)
+    sb, playwright, browser, context, page = launch_browser()
 
     probe_url = build_page_url(BASE_URL, 1)
     print("  Probing page 1 after pause...")
     _items, probe_status = scrape_page(page, probe_url, page_num=1)
     print(f"  Probe result after {minutes} min pause: {probe_status}")
 
-    return sb, browser, context, page, probe_status
+    return sb, playwright, browser, context, page, probe_status
 
 
 if __name__ == "__main__":
@@ -349,109 +350,110 @@ if __name__ == "__main__":
     # Calculate stop time exactly 3 hours from script start
     stop_time = datetime.now(SGT) + timedelta(hours=3)
 
-    with sync_playwright() as p:
+    sb, playwright, browser, context, page = launch_browser()
 
-        sb, browser, context, page = launch_browser(p)
+    last_in_stock_ids = set()
+    empty_streak = 0
+    empty_streak_alerted = False
+    cycle_count = 0
 
-        last_in_stock_ids = set()
-        empty_streak = 0
-        empty_streak_alerted = False
-        cycle_count = 0
+    print(f"Starting poll loop, stopping at {stop_time.strftime('%Y-%m-%d %H:%M:%S')} SGT...")
 
-        print(f"Starting poll loop, stopping at {stop_time.strftime('%Y-%m-%d %H:%M:%S')} SGT...")
+    # Stop condition using datetime
+    while datetime.now(SGT) < stop_time:
 
-        # Stop condition using datetime
-        while datetime.now(SGT) < stop_time:
+        cycle_start = time.time()
+        cycle_count += 1
 
-            cycle_start = time.time()
-            cycle_count += 1
+        print(f"\n--- Cycle {cycle_count} "
+              f"({datetime.now(SGT).strftime('%H:%M:%S')} SGT) ---")
 
-            print(f"\n--- Cycle {cycle_count} "
-                  f"({datetime.now(SGT).strftime('%H:%M:%S')} SGT) ---")
+        all_items, block_reason = scrape_all_pages(page)
 
-            all_items, block_reason = scrape_all_pages(page)
+        if block_reason is not None or not all_items:
+            empty_streak += 1
+            reason_label = block_reason or "no items"
+            print(f"  Empty/blocked capture ({reason_label}) (streak: {empty_streak})")
 
-            if block_reason is not None or not all_items:
-                empty_streak += 1
-                reason_label = block_reason or "no items"
-                print(f"  Empty/blocked capture ({reason_label}) (streak: {empty_streak})")
+            if (
+                empty_streak >= EMPTY_STREAK_ALERT_THRESHOLD
+                and not empty_streak_alerted
+            ):
+                empty_streak_alerted = True
 
-                if (
-                    empty_streak >= EMPTY_STREAK_ALERT_THRESHOLD
-                    and not empty_streak_alerted
-                ):
-                    empty_streak_alerted = True
+                send_telegram_message(
+                    f"⚠️ No product data captured for "
+                    f"{empty_streak} cycles in a row "
+                    f"(last reason: {reason_label}). "
+                    f"Trying pause-and-retry before switching servers..."
+                )
 
+                send_telegram_message(
+                    f"  Pausing {RETRY_PAUSE_MINUTES} min before retrying..."
+                )
+                sb, playwright, browser, context, page, probe_status = pause_and_relaunch(
+                    sb, playwright, browser, RETRY_PAUSE_MINUTES
+                )
+
+                if probe_status == "ok":
                     send_telegram_message(
-                        f"⚠️ No product data captured for "
-                        f"{empty_streak} cycles in a row "
-                        f"(last reason: {reason_label}). "
-                        f"Pausing {RETRY_PAUSE_MINUTES} min before retrying..."
+                        f"✅ Recovered after {RETRY_PAUSE_MINUTES} min pause. "
+                        "Resuming normal polling."
                     )
-
-                    sb, browser, context, page, probe_status = pause_and_relaunch(
-                        p, sb, browser, RETRY_PAUSE_MINUTES
+                    empty_streak = 0
+                    empty_streak_alerted = False
+                else:
+                    send_telegram_message(
+                        f"❌ Still {probe_status} after {RETRY_PAUSE_MINUTES} "
+                        "min pause. Switching servers..."
                     )
+                    close_browser(sb, playwright, browser)
+                    switch_servers()
+                    print("  Alert sent. Stopping run.")
+                    break
 
-                    if probe_status == "ok":
-                        send_telegram_message(
-                            f"✅ Recovered after {RETRY_PAUSE_MINUTES} min pause. "
-                            "Resuming normal polling."
-                        )
-                        empty_streak = 0
-                        empty_streak_alerted = False
-                    else:
-                        send_telegram_message(
-                            f"❌ Still {probe_status} after {RETRY_PAUSE_MINUTES} "
-                            "min pause. Switching servers..."
-                        )
-                        close_browser(sb, browser)
-                        switch_servers()
-                        print("  Alert sent. Stopping run.")
-                        break
+        else:
+            empty_streak = 0
+            empty_streak_alerted = False
 
-            else:
-                empty_streak = 0
-                empty_streak_alerted = False
+            in_stock_items = [
+                item for item in all_items if item["inStock"]
+            ]
+            current_ids = {
+                item["itemId"] for item in all_items
+                if item["inStock"]
+            }
 
-                in_stock_items = [
-                    item for item in all_items if item["inStock"]
-                ]
-                current_ids = {
-                    item["itemId"] for item in all_items
-                    if item["inStock"]
-                }
+            print(
+                f"  Total: {len(all_items)} | "
+                f"In stock: {len(in_stock_items)}"
+            )
 
-                print(
-                    f"  Total: {len(all_items)} | "
-                    f"In stock: {len(in_stock_items)}"
-                )
+            changed = current_ids != last_in_stock_ids
+            heartbeat_due = (
+                cycle_count % ALERT_ON_NO_CHANGE_EVERY == 0
+            )
 
-                changed = current_ids != last_in_stock_ids
-                heartbeat_due = (
-                    cycle_count % ALERT_ON_NO_CHANGE_EVERY == 0
-                )
+            if changed or heartbeat_due:
+                message = format_stock_message(in_stock_items)
+                if not changed:
+                    message = "(heartbeat, no change)\n\n" + message
+                send_telegram_message(message)
 
-                if changed or heartbeat_due:
-                    message = format_stock_message(in_stock_items)
-                    if not changed:
-                        message = "(heartbeat, no change)\n\n" + message
-                    send_telegram_message(message)
+            last_in_stock_ids = current_ids
 
-                last_in_stock_ids = current_ids
+        # Count how long this cycle took. If it was already over 5s,
+        # start the next one immediately (no extra sleep). If it was
+        # under 5s, wait out the remainder.
+        elapsed = time.time() - cycle_start
+        sleep_time = max(0, POLL_INTERVAL - elapsed)
 
-            # Count how long this cycle took. If it was already over 5s,
-            # start the next one immediately (no extra sleep). If it was
-            # under 5s, wait out the remainder.
-            elapsed = time.time() - cycle_start
-            sleep_time = max(0, POLL_INTERVAL - elapsed)
+        print(f"  Cycle took {elapsed:.1f}s, "
+              f"sleeping {sleep_time:.1f}s")
 
-            print(f"  Cycle took {elapsed:.1f}s, "
-                  f"sleeping {sleep_time:.1f}s")
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-        close_browser(sb, browser)
+    close_browser(sb, playwright, browser)
 
     print("Stop time reached, exiting.")
