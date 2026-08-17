@@ -42,7 +42,7 @@ SGT = ZoneInfo("Asia/Singapore")
 # Target seconds between cycle starts. If a cycle takes longer than this, the next cycle starts immediately with no extra delay;
 POLL_INTERVAL = 5  
 # Only send a Telegram alert when the set of in-stock items actually changes
-ALERT_ON_NO_CHANGE_EVERY = 120  # still send a heartbeat every N cycles
+ALERT_ON_NO_CHANGE_EVERY = 240  # still send a heartbeat every N cycles
 EMPTY_STREAK_ALERT_THRESHOLD = 2
 # Hard ceiling on how long we'll event-wait for the product AJAX response on a single page load
 AJAX_WAIT_HARD_CAP_MS = 20000
