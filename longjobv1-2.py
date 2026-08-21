@@ -53,7 +53,7 @@ PAGE_STAGGER_SECONDS = 0.5
 RETRY_PAUSE_MINUTES = 10
 
 
-def switch_servers(event_type="run-longjobv1-1"):
+def switch_servers(event_type="run-longjobv1-2"):
     url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/dispatches"
     response = requests.post(
         url,
@@ -452,10 +452,10 @@ async def main():
                 else:
                     send_telegram_message(
                         f"❌ Still {probe_status} after {RETRY_PAUSE_MINUTES} "
-                        "min pause. Switching servers..."
+                        "min pause. Quitting..."
                     )
                     await close_browser(sb, playwright, browser)
-                    switch_servers()
+                    #switch_servers()
                     print("  Alert sent. Stopping run.")
                     break
         else:
